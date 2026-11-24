@@ -1,0 +1,74 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        APP_DIR="/opt/openintegrationengine/lib/app"
+        BIN_DIR="/opt/openintegrationengine/bin"
+        SYSTEMD_DEST="/etc/systemd/system/openintegrationengine.service"
+
+        # Create base directories
+        mkdir -p "$APP_DIR/appdata"
+        mkdir -p "$APP_DIR/logs"
+
+        # Link resources towards /opt/openintegrationengine/bin
+        # Allows jpackage resolve relative paths correctly
+        if [ -d "$BIN_DIR" ]; then
+            for dir in server-lib conf extensions public_html appdata logs; do
+                if [ -e "$APP_DIR/$dir" ] && [ ! -e "$BIN_DIR/$dir" ]; then
+                    ln -s "$APP_DIR/$dir" "$BIN_DIR/$dir"
+                fi
+            done
+        fi
+
+        # Deploy systemd
+        if [ -f "$APP_DIR/conf/openintegrationengine.service" ]; then
+            cp "$APP_DIR/conf/openintegrationengine.service" "$SYSTEMD_DEST"
+        elif [ -f "/opt/openintegrationengine/conf/openintegrationengine.service" ]; then
+            cp "/opt/openintegrationengine/conf/openintegrationengine.service" "$SYSTEMD_DEST"
+        elif [ -f "/opt/openintegrationengine/openintegrationengine.service" ]; then
+            cp "/opt/openintegrationengine/openintegrationengine.service" "$SYSTEMD_DEST"
+        fi
+
+        if [ -f "$SYSTEMD_DEST" ]; then
+            chmod 644 "$SYSTEMD_DEST"
+        fi
+
+        # Expose oieserver and oiecommand globally in PATH
+        if [ -x "/opt/openintegrationengine/bin/openintegrationengine" ]; then
+cat << 'EOF' > /usr/local/bin/oieserver
+#!/bin/sh
+cd /opt/openintegrationengine/lib/app || exit 1
+exec /opt/openintegrationengine/bin/openintegrationengine "$@"
+EOF
+            chmod 755 /usr/local/bin/oieserver
+        fi
+
+        cat << 'EOF' > /usr/local/bin/oiecommand
+#!/bin/sh
+cd /opt/openintegrationengine/lib/app || exit 1
+JAVA_CMD="/usr/bin/java"
+if [ -x "/opt/openintegrationengine/lib/runtime/bin/java" ]; then
+    JAVA_CMD="/opt/openintegrationengine/lib/runtime/bin/java"
+fi
+exec "$JAVA_CMD" -jar /opt/openintegrationengine/lib/app/mirth-cli-launcher.jar "$@"
+EOF
+        chmod 755 /usr/local/bin/oiecommand
+
+        # Register and run service if systemd is active as PID 1
+        # (In Docker/Containers this will be omitted)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable openintegrationengine.service
+            systemctl restart openintegrationengine.service || systemctl start openintegrationengine.service || true
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        ;;
+esac
+
+exit 0

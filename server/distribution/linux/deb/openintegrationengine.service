@@ -1,0 +1,16 @@
+[Unit]
+Description=Open Integration Engine Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/openintegrationengine/lib/app
+ExecStart=/usr/bin/java -Ddir.base=/opt/openintegrationengine/lib/app --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED -jar /opt/openintegrationengine/lib/app/mirth-server-launcher.jar
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

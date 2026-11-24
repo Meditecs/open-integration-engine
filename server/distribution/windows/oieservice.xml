@@ -1,0 +1,10 @@
+<service>
+  <id>OpenIntegrationEngine</id>
+  <name>Open Integration Engine Service</name>
+  <description>Open Integration Engine Backend Server</description>
+  <executable>%BASE%\jre\bin\java.exe</executable>
+  <arguments>-server -Xmx256m -Djava.awt.headless=true -Ddir.base="%BASE%" --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED -jar "%BASE%\mirth-server-launcher.jar"</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+  <logmode>rotate</logmode>
+  <onfailure action="restart" delay="10 sec"/>
+</service>

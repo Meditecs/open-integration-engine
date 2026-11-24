@@ -336,3 +336,483 @@ tasks.register('verifyVendoredParity') {
 // Note: the Ant build's append-license target was already broken at the
 // time of the migration (no jar in the repository contains
 // com.mirth.tools.header.HeaderTask), so it was not ported.
+
+//INSTALLERS
+tasks.register('prepareServerBundle') {
+    dependsOn ':server:stageSetup',
+              ':server:serverJar',
+              ':server:launcherJar',
+              ':server:cryptoJar',
+              ':server:clientCoreJar',
+              ':server:userutilSourcesJar',
+              ':server:dbconfJar'
+    description = 'Compile JARs from server and prepares directory server/setup.'
+}
+// tar.gz package 
+tasks.register('distPackage', Exec) {
+    group = 'distribution'
+    description = 'Generates portable package with jpackage in .tar.gz format'
+    dependsOn 'prepareServerBundle'
+
+    def outputDir = layout.buildDirectory.dir("distributions").get().asFile
+    def distDir = file("${buildDir}/tmp/pkg")
+    def appDir = file("${distDir}/openintegrationengine")
+    def stagingInput = file("${buildDir}/tmp/pkg-input")
+    def scriptsDir = file("${rootDir}/server/distribution")
+    def setupDir = file("${rootDir}/server/setup")
+    def versionStr = (project.findProperty('version') && project.version != 'unspecified') ? project.version : "4.7.0"
+    def outTarGz = file("${outputDir}/openintegrationengine-${versionStr}-linux-x64.tar.gz")
+
+    outputs.file(outTarGz)
+
+    doFirst {
+        outputDir.mkdirs()
+        outTarGz.delete()
+        delete distDir
+        delete stagingInput
+        distDir.mkdirs()
+
+        // Prepares clean entry without Windows artifacts or distribution folders
+        copy {
+            from(setupDir)
+            into(stagingInput)
+            exclude 'distribution/**', '*.exe', '*.bat', '*.ps1', 'oieservice*'
+        }
+    }
+
+    commandLine 'sh', '-c', """
+        set -e
+        # 1. Create jpackage app-image with bundled runtime
+        jpackage \
+          --type app-image \
+          --name "openintegrationengine" \
+          --app-version "${versionStr}" \
+          --input "${stagingInput.absolutePath}" \
+          --main-jar "mirth-server-launcher.jar" \
+          --main-class "com.mirth.connect.server.launcher.MirthLauncher" \
+          --java-options "-server -Xmx256m -Djava.awt.headless=true -Ddir.base=\\\$APPDIR --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.text=ALL-UNNAMED --add-opens=java.desktop/java.awt.font=ALL-UNNAMED" \
+          --dest "${distDir.absolutePath}"
+
+        # 2. Inject Unix scripts and oiecommand CLI wrapper (using bundled jpackage runtime)
+        cp "${scriptsDir}"/tar/*.sh "${appDir}/"
+        cat << 'EOF' > "${appDir}/oiecommand"
+#!/usr/bin/env bash
+SCRIPT_PATH="\$(readlink -f "\$0" 2>/dev/null || realpath "\$0" 2>/dev/null || echo "\$0")"
+DIR_BASE="\$(cd "\$(dirname "\$SCRIPT_PATH")" && pwd)"
+cd "\$DIR_BASE/lib/app"
+exec "\$DIR_BASE/lib/runtime/bin/java" -jar "\$DIR_BASE/lib/app/mirth-cli-launcher.jar" "\$@"
+EOF
+        chmod +x "${appDir}"/*.sh "${appDir}/oiecommand"
+
+        # 3. Compress distribution directly into build/distributions
+        tar -czf "${outTarGz.absolutePath}" -C "${distDir.absolutePath}" openintegrationengine
+        echo "Package generated in: ${outTarGz.absolutePath}"
+    """
+
+    doLast {
+        delete distDir
+        delete stagingInput
+    }
+}
+// Debian/Ubuntu native installer .deb
+tasks.register('distDeb', Exec) {
+    group = 'distribution'
+    description = 'Generates a Debian/Ubuntu native installer .deb with systemd support'
+    dependsOn 'prepareServerBundle'
+
+    def outputDir = layout.buildDirectory.dir("distributions").get().asFile
+    def resourcesDir = file("${project(':server').projectDir}/distribution/linux/deb")
+    def setupDir = file("${project(':server').projectDir}/setup")
+    def stagingInput = file("${buildDir}/tmp/deb-input")
+    def version = project.hasProperty('version') ? project.version : "4.7.0"
+    def arch = System.getProperty("os.arch") == "aarch64" ? "arm64" : "amd64"
+    def outDebFile = file("${outputDir}/openintegrationengine_${version}-1_${arch}.deb")
+
+    outputs.file(outDebFile)
+
+    doFirst {
+        outputDir.mkdirs()
+        if (outDebFile.exists()) {
+            outDebFile.delete()
+        }
+        delete stagingInput
+        copy {
+            from(setupDir)
+            into(stagingInput)
+            exclude 'distribution/**', '*.exe', '*.bat', '*.ps1', 'oieservice*'
+        }
+    }
+
+    commandLine 'jpackage',
+        '--type', 'deb',
+        '--name', 'openintegrationengine',
+        '--app-version', version,
+        '--description', 'Open Integration Engine Server',
+        '--vendor', 'OpenIntegrationEngine',
+        '--input', setupDir.absolutePath,
+        '--main-jar', 'mirth-server-launcher.jar',
+        '--main-class', 'com.mirth.connect.server.launcher.MirthLauncher',
+        '--dest', outputDir.absolutePath,
+        '--install-dir', '/opt',
+        '--resource-dir', resourcesDir.absolutePath,
+        '--linux-package-name', 'openintegrationengine',
+        '--linux-package-deps', 'openjdk-17-jre-headless',
+        '--linux-deb-maintainer', 'admin@example.com',
+        '--linux-app-category', 'misc',
+        '--java-options', '-server -Xmx256m -Djava.awt.headless=true -Ddir.base=/opt/openintegrationengine/lib/app --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED'
+    
+    doLast {
+        delete stagingInput
+    }
+}
+// Generic Unix installer
+tasks.register('distInstallerSh') {
+    group = 'distribution'
+    description = 'Generates a .sh autoexecutable installer universal for Linux'
+    dependsOn 'prepareServerBundle'
+
+    def setupDir = file("${project(':server').projectDir}/setup")
+    def headerFile = file("${project(':server').projectDir}/distribution/linux/sh/installer.sh")
+    def outputDir = layout.buildDirectory.dir("distributions").get().asFile
+    def version    = (project.findProperty('version') && project.version != 'unspecified') ? project.version : "4.7.0"
+    def finalSh = new File(outputDir, "oie-installer.sh")
+    def tempTar = new File(layout.buildDirectory.asFile.get(), "temp-payload.tar.gz")
+
+    outputs.file(finalSh)
+
+    doLast {
+        outputDir.mkdirs()
+        tempTar.parentFile.mkdirs()
+
+        // Create  tarball in temporary memory/disk
+        ant.tar(destfile: tempTar, compression: 'gzip') {
+            tarfileset(dir: setupDir) {
+                exclude(name: 'distribution/**')
+                exclude(name: '*.exe')
+                exclude(name: '*.bat')
+                exclude(name: '*.ps1')
+                exclude(name: 'oieservice*')
+                exclude(name: 'oieserver')
+                //exclude(name: 'oiecommand')
+            }
+            tarfileset(dir: setupDir, filemode: '755') {
+                include(name: 'oieserver')
+                //include(name: 'oiecommand')
+            }
+        }
+
+        // Join script shell with binary tar.gz
+        finalSh.withOutputStream { out ->
+            headerFile.withInputStream { ins -> out << ins }
+            out << "\n"
+            tempTar.withInputStream { ins -> out << ins }
+        }
+
+        // Add execution permits
+        finalSh.setExecutable(true, false)
+        tempTar.delete()
+        
+        println "Generated installer in: ${finalSh.absolutePath}"
+    }
+}
+
+
+// WINDOWS INSTALLER
+// Internal task: Downloads JRE
+// 1. Download Windows JREs (x64 & aarch64)
+def winJreArchs = [
+    [name: 'X64',   apiArch: 'x64',     folder: 'jre-win-x64'],
+    [name: 'Arm64', apiArch: 'aarch64', folder: 'jre-win-arm64']
+]
+
+winJreArchs.each { arch ->
+    tasks.register("downloadWindows${arch.name}Jre") {
+        def jreTargetDir = file("${buildDir}/${arch.folder}")
+        def jreZip = file("${buildDir}/tmp/temurin-jre-win-${arch.apiArch}.zip")
+        outputs.dir(jreTargetDir)
+
+        doLast {
+            if (!jreTargetDir.exists() || jreTargetDir.list().length == 0) {
+                jreTargetDir.mkdirs()
+                jreZip.parentFile.mkdirs()
+
+                def downloadUrl = arch.apiArch == 'aarch64'
+                    ? "https://download.bell-sw.com/java/17.0.13+12/bellsoft-jre17.0.13+12-windows-aarch64.zip"
+                    : "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jre/hotspot/normal/eclipse?project=jdk"
+                def currentUrl = new URL(downloadUrl)
+                def connection = null
+                for (int i = 0; i < 8; i++) {
+                    connection = currentUrl.openConnection()
+                    connection.setRequestProperty("User-Agent", "Gradle-Downloader")
+                    connection.instanceFollowRedirects = false
+                    int code = connection.responseCode
+                    if (code in [301, 302, 307, 308]) {
+                        currentUrl = new URL(connection.getHeaderField("Location"))
+                    } else if (code == 200) {
+                        break
+                    } else {
+                        throw new GradleException("Unexpected HTTP ${code} downloading Windows ${arch.apiArch} JRE")
+                    }
+                }
+                jreZip.withOutputStream { it << connection.inputStream }
+
+                copy {
+                    from zipTree(jreZip)
+                    into jreTargetDir
+                    eachFile { fcd -> fcd.path = fcd.path.replaceFirst("^[^/]+/", "") }
+                    includeEmptyDirs = false
+                }
+                jreZip.delete()
+            }
+        }
+    }
+}
+
+// 2. Define the 4 Windows .exe installers matching install4j IDs (27, 121, 119, 136)
+def winInstallerVariants = [
+    [name: 'X64NoJre',     platform: 'windows-x64',   jreFolder: null,            jreTask: null,                    winsw: 'WinSW-x64.exe',   suffix: ''],
+    [name: 'X64WithJre',   platform: 'windows-x64',   jreFolder: 'jre-win-x64',   jreTask: 'downloadWindowsX64Jre',   winsw: 'WinSW-x64.exe',   suffix: '-with-JRE'],
+    [name: 'Arm64NoJre',   platform: 'windows-arm64', jreFolder: null,            jreTask: null,                    winsw: 'WinSW-arm64.exe', suffix: ''],
+    [name: 'Arm64WithJre', platform: 'windows-arm64', jreFolder: 'jre-win-arm64', jreTask: 'downloadWindowsArm64Jre', winsw: 'WinSW-arm64.exe', suffix: '-with-JRE']
+]
+
+winInstallerVariants.each { variant ->
+    tasks.register("distWindows${variant.name}") {
+        group = 'distribution'
+        dependsOn 'prepareServerBundle'
+        if (variant.jreTask) dependsOn variant.jreTask
+
+        def serverDir = project(':server').projectDir
+        def winDistDir = file("${buildDir}/win-staging-${variant.name}")
+        def finalDistDir = file("${buildDir}/distributions")
+        def baseFileName = "oie_${variant.platform}_${project.version}${variant.suffix}"
+
+        doLast {
+            winDistDir.deleteDir()
+            winDistDir.mkdirs()
+            finalDistDir.mkdirs()
+
+            copy { from "${serverDir}/setup"; into winDistDir }
+
+            if (variant.jreFolder) {
+                copy { from file("${buildDir}/${variant.jreFolder}"); into "${winDistDir}/jre" }
+            }
+
+            copy { from "${serverDir}/distribution/windows/oieservice.xml"; into winDistDir }
+            copy { from "${serverDir}/distribution/windows/installer.iss"; into winDistDir }
+
+            //If it has an embedded JRE use java.exe directly
+            if (variant.jreFolder) {
+                def serviceXml = file("${winDistDir}/oieservice.xml")
+                serviceXml.text = serviceXml.text.replace(
+                    '<executable>java</executable>',
+                    '<executable>%BASE%\\jre\\bin\\java.exe</executable>'
+                )
+            }
+
+            // Generate oiecommand.bat
+            file("${winDistDir}/oiecommand.bat").text = '''@echo off
+                setlocal
+                set "DIR_BASE=%~dp0"
+                set "JAVA_CMD=java"
+                if exist "%DIR_BASE%jre\\bin\\java.exe" (
+                    set "JAVA_CMD=%DIR_BASE%jre\\bin\\java.exe"
+                )
+                pushd "%DIR_BASE%"
+                "%JAVA_CMD%" -jar "%DIR_BASE%mirth-cli-launcher.jar" %*
+                popd
+                '''
+
+            ant.get(
+                src: "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+                dest: file("${winDistDir}/oieservice.exe"),
+                skipexisting: true
+            )
+
+            file("${winDistDir}/installer").mkdirs()
+            project.ant.chmod(dir: winDistDir, perm: '777', type: 'both', includes: '**/*')
+            project.ant.chmod(dir: winDistDir, perm: '777')
+
+            exec {
+                commandLine 'docker', 'run', '--rm',
+                            '-v', "${winDistDir.absolutePath}:/work",
+                            'amake/innosetup',
+                            "/DOutputBaseFilename=${baseFileName}",
+                            "/DIncludeJre=${variant.jreFolder != null}",
+                            'installer.iss'
+            }
+
+            copy {
+                from "${winDistDir}/installer/${baseFileName}.exe"
+                into finalDistDir
+            }
+            winDistDir.deleteDir()
+        }
+    }
+}
+
+// 3. Define the 2 Windows .zip archives matching install4j IDs (153, 167)
+['windows-x64', 'windows-arm64'].each { plat ->
+    def capPlat = plat == 'windows-x64' ? 'X64' : 'Arm64'
+    tasks.register("distWindows${capPlat}Archive", Zip) {
+        group = 'distribution'
+        dependsOn ':server:stageSetup', ':server:serverJar', ':server:launcherJar',
+                  ':server:cryptoJar', ':server:clientCoreJar', ':server:userutilSourcesJar', ':server:dbconfJar'
+        archiveFileName = "oie_${plat}_${project.version}.zip"
+        destinationDirectory = file("${buildDir}/distributions")
+        from("${project(':server').projectDir}/setup") {
+            into "OpenIntegrationEngine"
+        }
+    }
+}
+tasks.register('distWindows') {
+    group = 'distribution'
+    description = 'Generates the 4 Windows installers (.exe) and 2 archives (.zip) defined in install4j.'
+    dependsOn 'distWindowsX64NoJre',
+              'distWindowsX64WithJre',
+              'distWindowsX64Archive',
+              'distWindowsArm64NoJre',
+              'distWindowsArm64WithJre',
+              'distWindowsArm64Archive'
+}
+
+// MACOS (APPLE SILICON aarch64 + INTEL x64)
+def appShortName = "oie"
+def appVersion   = project.findProperty('version') && project.version != 'unspecified' ? project.version : "4.7.0"
+
+// Downloads 2 JREs (one for each architecture)
+def macJreArchs = [
+    [name: 'Arm64', apiArch: 'aarch64'],
+    [name: 'X64',   apiArch: 'x64']
+]
+
+macJreArchs.each { arch ->
+    def jreTargetDir = file("${buildDir}/jre-mac-${arch.apiArch}")
+    def jreTarGz     = file("${buildDir}/tmp/temurin-jre-mac-${arch.apiArch}.tar.gz")
+
+    tasks.register("downloadMac${arch.name}Jre") {
+        outputs.dir(jreTargetDir)
+        doLast {
+            if (!file("${jreTargetDir}/bin/java").exists()) {
+                jreTargetDir.mkdirs()
+                jreTarGz.parentFile.mkdirs()
+
+                def currentUrl = "https://api.adoptium.net/v3/binary/latest/17/ga/mac/${arch.apiArch}/jre/hotspot/normal/eclipse?project=jdk"
+                def connection = null
+                for (int i = 0; i < 8; i++) {
+                    connection = new URL(currentUrl).openConnection()
+                    connection.setRequestProperty("User-Agent", "Gradle-Downloader")
+                    connection.instanceFollowRedirects = false
+                    if (connection.responseCode in [301, 302, 307, 308]) {
+                        currentUrl = connection.getHeaderField("Location")
+                    } else if (connection.responseCode == 200) {
+                        break
+                    } else {
+                        throw new GradleException("Error HTTP ${connection.responseCode} descargando JRE macOS (${arch.apiArch})")
+                    }
+                }
+                jreTarGz.withOutputStream { it << connection.inputStream }
+
+                copy {
+                    from tarTree(resources.gzip(jreTarGz))
+                    into jreTargetDir
+                    eachFile { fcd ->
+                        fcd.path = fcd.path.replaceFirst("^[^/]+/Contents/Home/", "")
+                    }
+                    includeEmptyDirs = false
+                }
+                jreTarGz.delete()
+            }
+        }
+    }
+}
+
+// For variants defined in og install4j -> generates final .dmg installers (IDs 43, 130, 116, 133)
+def macVariants = [
+    [name: 'Arm64NoJre',   apiArch: 'aarch64', jreTask: null,                  suffix: 'aarch'],
+    [name: 'Arm64WithJre', apiArch: 'aarch64', jreTask: 'downloadMacArm64Jre', suffix: 'aarch-with-JRE'],
+    [name: 'X64NoJre',     apiArch: 'x64',     jreTask: null,                  suffix: 'x86'],
+    [name: 'X64WithJre',   apiArch: 'x64',     jreTask: 'downloadMacX64Jre',   suffix: 'x86-with-JRE']
+]
+
+macVariants.each { variant ->
+    def stagingRoot = file("${buildDir}/mac-staging-${variant.suffix}")
+    def installDir  = file("${stagingRoot}/OpenIntegrationEngine")
+    def stageDir    = file("${projectDir}/server/setup")
+    def outDmg      = file("${buildDir}/distributions/${appShortName}_macos_${appVersion}-${variant.suffix}.dmg")
+
+    tasks.register("distMac${variant.name}") {
+        dependsOn 'prepareServerBundle'
+        if (variant.jreTask) {
+            dependsOn variant.jreTask
+        }
+        outputs.file(outDmg)
+
+        doLast {
+            delete stagingRoot
+            installDir.mkdirs()
+
+            // A) Copy content from server/setup
+            copy {
+                from(stageDir)
+                into installDir
+                exclude 'distribution/**', '*.exe', '*.bat', '*.ps1', 'oieservice*'
+            }
+
+            // B) Copy generic Unix scripts (service.sh / start.sh)
+            copy {
+                from("${stageDir}/distribution")
+                into installDir
+                include '*.sh'
+            }
+
+            // C) If there is variant -with-JRE, embed corresponding runtime in /jre
+            if (variant.jreTask) {
+                copy {
+                    from file("${buildDir}/jre-mac-${variant.apiArch}")
+                    into "${installDir}/jre"
+                }
+                fileTree("${installDir}/jre/bin").each { it.setExecutable(true, false) }
+                // Point oieserver directly to the bundled JRE via -java-cmd
+                def vmOptionsFile = file("${installDir}/oieserver.vmoptions")
+                if (vmOptionsFile.exists()) {
+                    vmOptionsFile.append("\n-java-cmd jre/bin/java\n")
+                }
+            }
+            // Generate oiecommand CLI wrapper (uses bundled JRE if present, else system java)
+            def cliScript = file("${installDir}/oiecommand")
+            cliScript.text = '''#!/usr/bin/env bash
+            SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+            DIR_BASE="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+            JAVA_CMD="java"
+            if [ -x "$DIR_BASE/jre/bin/java" ]; then
+                JAVA_CMD="$DIR_BASE/jre/bin/java"
+            fi
+            cd "$DIR_BASE"
+            exec "$JAVA_CMD" -jar "$DIR_BASE/mirth-cli-launcher.jar" "$@"
+            '''
+            // Execution permission for starting scripts
+            fileTree(installDir) { include '*.sh', 'oieserver', 'oiecommand' }.each { it.setExecutable(true, false) }
+
+            // D) Generate image .dmg with root folder OpenIntegrationEngine/
+            outDmg.parentFile.mkdirs()
+            outDmg.delete()
+
+            exec {
+                commandLine 'genisoimage',
+                    '-V', 'OpenIntegrationEngine',
+                    '-D', '-R', '-apple', '-no-pad',
+                    '-o', outDmg.absolutePath,
+                    stagingRoot.absolutePath
+            }
+
+            println "Generated: ${outDmg.name}"
+        }
+    }
+}
+
+// Main task to generate 4 macOS .dmg
+tasks.register('distMac') {
+    dependsOn macVariants.collect { "distMac${it.name}" }
+    description = 'Generates the 4 macOS installers (.dmg) defined in install4j.'
+}

@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+# Stop and disable daemon before deleting files
+if [ -d /run/systemd/system ]; then
+    systemctl stop openintegrationengine.service || true
+    systemctl disable openintegrationengine.service || true
+fi
+
+# Clean service file from systemd if it exists
+if [ -f /etc/systemd/system/openintegrationengine.service ]; then
+    rm -f /etc/systemd/system/openintegrationengine.service
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+fi
+
+# Remove global CLI symlinks/wrappers
+rm -f /usr/local/bin/oieserver /usr/local/bin/oiecommand
+
+exit 0
