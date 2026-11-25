@@ -493,11 +493,9 @@ tasks.register('distInstallerSh') {
                 exclude(name: '*.ps1')
                 exclude(name: 'oieservice*')
                 exclude(name: 'oieserver')
-                //exclude(name: 'oiecommand')
             }
             tarfileset(dir: setupDir, filemode: '755') {
                 include(name: 'oieserver')
-                //include(name: 'oiecommand')
             }
         }
 
@@ -656,8 +654,7 @@ winInstallerVariants.each { variant ->
     def capPlat = plat == 'windows-x64' ? 'X64' : 'Arm64'
     tasks.register("distWindows${capPlat}Archive", Zip) {
         group = 'distribution'
-        dependsOn ':server:stageSetup', ':server:serverJar', ':server:launcherJar',
-                  ':server:cryptoJar', ':server:clientCoreJar', ':server:userutilSourcesJar', ':server:dbconfJar'
+        dependsOn 'prepareServerBundle'
         archiveFileName = "oie_${plat}_${project.version}.zip"
         destinationDirectory = file("${buildDir}/distributions")
         from("${project(':server').projectDir}/setup") {
@@ -759,14 +756,7 @@ macVariants.each { variant ->
                 exclude 'distribution/**', '*.exe', '*.bat', '*.ps1', 'oieservice*'
             }
 
-            // B) Copy generic Unix scripts (service.sh / start.sh)
-            copy {
-                from("${stageDir}/distribution")
-                into installDir
-                include '*.sh'
-            }
-
-            // C) If there is variant -with-JRE, embed corresponding runtime in /jre
+            // B) If there is variant -with-JRE, embed corresponding runtime in /jre
             if (variant.jreTask) {
                 copy {
                     from file("${buildDir}/jre-mac-${variant.apiArch}")
